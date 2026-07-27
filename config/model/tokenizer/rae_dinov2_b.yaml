@@ -1,0 +1,4 @@
+# @package model.tokenizer
+name: RAE
+config_path: RAE/configs/stage1/pretrained/DINOv2-B.yaml
+spatial_compression: 14   # DINOv2 patch size

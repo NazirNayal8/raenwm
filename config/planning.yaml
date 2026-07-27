@@ -1,0 +1,48 @@
+# Root config for planning_eval.py (hydra entrypoint) — CEM planning evaluation.
+#   python planning_eval.py checkpoint.path=/path/to/ckpt.pth.tar run.datasets=recon
+#   python planning_eval.py planning.traj_sampler=line planning.opt_steps=20
+defaults:
+  - model/tokenizer: rae_dinov2_b
+  - model/denoiser: cdit_b_2
+  - model/transport: velocity_linear
+  - data/eval: recon_sacson_scand
+  - _self_
+
+seed: 0
+
+run:
+  datasets: recon
+  output_dir: results_plan
+  batch_size: 16
+  num_workers: 8
+  save_preds: false
+  subset_items: 0
+  subset_seed: 0
+  run_tag: ""
+
+planning:
+  score_type: dino          # "dino" | "lpips"
+  traj_sampler: curve       # "curve" | "line"
+  num_samples: 10
+  rollout_stride: 1
+  topk: 5
+  opt_steps: 15
+  num_repeat_eval: 1
+  prior_mix: 0.0
+  backtrack_allow: 0.0
+  prior_beta: 0.8
+  plot: false
+  plot_topn: 10
+
+checkpoint:
+  path: null
+  name: null
+  step: "0100000"
+  results_dir: logs
+  run_name: raenwm
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${run.output_dir}/hydra

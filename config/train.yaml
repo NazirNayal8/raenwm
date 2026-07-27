@@ -1,0 +1,57 @@
+# Root config for train.py (hydra entrypoint).
+#   torchrun --nproc_per_node=N train.py                       # defaults below
+#   torchrun --nproc_per_node=N train.py train.batch_size=8    # override any field
+#   torchrun --nproc_per_node=N train.py model/denoiser=cdit_l_2 data/train=recon
+defaults:
+  - model/tokenizer: rae_dinov2_b
+  - model/denoiser: cdit_b_2
+  - model/transport: velocity_linear
+  - data/train: recon_sacson_scand
+  - sampling@eval.sampling: euler_50
+  - _self_
+
+output_dir: logs        # experiment dir = ${output_dir}/${run_name}
+run_name: raenwm
+seed: 0
+
+train:
+  batch_size: 4
+  num_workers: 16
+  max_epochs: 300
+  max_steps: null         # if set, stop after N optimizer steps (overrides max_epochs)
+  grad_clip_val: 1.0
+  mixed_precision: bf16   # "bf16" | "no"
+  compile: true
+  debug_shapes: false
+  from_checkpoint: null
+  log_every: 100
+  ckpt_every: 2000
+  eval_every: 5000
+
+optimizer:
+  lr: 1e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  override_lr_on_resume: true
+
+scheduler:
+  lr_schedule: linear
+  final_lr: 1e-6
+
+eval:
+  num_batches: 3
+  # eval.sampling is supplied by the `sampling` default group
+
+wandb:
+  enabled: true
+  project: raenwm-training
+  entity: null
+  run_name: null          # null -> ${run_name}_<timestamp>
+  tags: [raenwm, rae, cdit]
+  notes: "Training RAENWM"
+
+hydra:
+  job:
+    chdir: false          # keep cwd at repo root (relative paths: data/, checkpoints/, config/)
+  run:
+    dir: ${output_dir}/${run_name}/hydra

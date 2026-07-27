@@ -1,0 +1,7 @@
+# Package is set by the including root via the defaults entry, e.g.
+#   - sampling@eval.sampling: euler_50   (train)   or   - sampling: euler_50  (infer)
+sampling_method: euler
+num_steps: 50
+atol: 1.0e-6
+rtol: 1.0e-3
+reverse: false

@@ -1,0 +1,37 @@
+# Root config for infer.py (hydra entrypoint) — generates rollout/time prediction sets.
+#   python infer.py checkpoint.path=/path/to/ckpt.pth.tar run.datasets=recon run.eval_type=rollout
+#   python infer.py run.gt=true run.datasets=recon                       # produce GT set
+defaults:
+  - model/tokenizer: rae_dinov2_b
+  - model/denoiser: cdit_b_2
+  - model/transport: velocity_linear
+  - data/eval: recon_sacson_scand
+  - sampling: euler_50
+  - _self_
+
+seed: 0
+
+run:
+  datasets: recon          # comma-separated
+  eval_type: rollout       # "rollout" | "time"
+  batch_size: 16
+  num_workers: 8
+  input_fps: 4
+  num_sec_eval: 5
+  rollout_fps_values: [1, 4]
+  max_ids: 0
+  gt: false
+  output_dir: results
+
+checkpoint:
+  path: null               # explicit full path (wins if set)
+  name: null               # -> {results_dir}/{run_name}/checkpoints/{name}.pth.tar
+  step: "0100000"          # -> {results_dir}/{run_name}/checkpoints/{step}.pth.tar
+  results_dir: logs
+  run_name: raenwm
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${run.output_dir}/hydra

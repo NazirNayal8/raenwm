@@ -2,7 +2,7 @@
 
 # Check if required arguments are provided
 if [ "$#" -lt 4 ]; then
-    echo "Usage: bash scripts/run_eval.sh [time|rollout] [gt|infer|eval|all] [DATASET] [CKPT_PATH]"
+    echo "Usage: bash run_eval.sh [time|rollout] [gt|infer|eval|all] [DATASET] [CKPT_PATH]"
     exit 1
 fi
 
@@ -16,19 +16,22 @@ EXP_DIR="${RESULTS_FOLDER}/exp_dir_euler"
 
 echo "========================================"
 echo "Starting Evaluation Pipeline"
-echo "Mode: ${EVAL_MODE}"
-echo "Step: ${STEP}"
-echo "Dataset: ${DATASET}"
-echo "Checkpoint: ${CKPT_PATH}"
+echo "Mode: ${EVAL_MODE}  Step: ${STEP}  Dataset: ${DATASET}  Checkpoint: ${CKPT_PATH}"
 echo "========================================"
+
+# infer.py is now a hydra entrypoint: pass config overrides as key=value (no --flags).
+INFER_COMMON="run.datasets=${DATASET} run.batch_size=32 run.num_workers=12 run.input_fps=4 \
+checkpoint.path=${CKPT_PATH} sampling.sampling_method=euler sampling.num_steps=50 \
+run.output_dir=${RESULTS_FOLDER} run.num_sec_eval=5 \
+data.eval_distance.eval_min_dist_cat=-64 data.eval_distance.eval_max_dist_cat=64 data.eval_len_traj_pred=64"
 
 # Define function for Ground-Truth preparation
 run_gt() {
     echo "--- Running Ground-Truth Preparation ---"
     if [ "$EVAL_MODE" = "time" ]; then
-_workers 12 --input_fps 4 --checkpoint_path ${CKPT_PATH} --sampling_method euler --num_steps 50 --eval_type time --output_dir ${RESULTS_FOLDER} --gt 1 --num_sec_eval 5 --eval_min_dist_cat -64 --eval_max_dist_cat 64 --eval_len_traj_pred 64
-    elif        python infer.py --exp config/raenwm.yaml --datasets ${DATASET} --batch_size 32 --num [ "$EVAL_MODE" = "rollout" ]; then
-        python infer.py --exp config/raenwm.yaml --datasets ${DATASET} --batch_size 32 --num_workers 12 --input_fps 4 --checkpoint_path ${CKPT_PATH} --sampling_method euler --num_steps 50 --eval_type rollout --output_dir ${RESULTS_FOLDER} --gt 1 --rollout_fps_values 4 --num_sec_eval 5 --eval_min_dist_cat -64 --eval_max_dist_cat 64 --eval_len_traj_pred 64
+        python infer.py ${INFER_COMMON} run.eval_type=time run.gt=true
+    elif [ "$EVAL_MODE" = "rollout" ]; then
+        python infer.py ${INFER_COMMON} run.eval_type=rollout run.gt=true 'run.rollout_fps_values=[4]'
     fi
 }
 
@@ -36,13 +39,13 @@ _workers 12 --input_fps 4 --checkpoint_path ${CKPT_PATH} --sampling_method euler
 run_infer() {
     echo "--- Running Future Frame Prediction ---"
     if [ "$EVAL_MODE" = "time" ]; then
-        python infer.py --exp config/raenwm.yaml --datasets ${DATASET} --batch_size 32 --num_workers 12 --input_fps 4 --checkpoint_path ${CKPT_PATH} --sampling_method euler --num_steps 50 --eval_type time --output_dir ${RESULTS_FOLDER} --gt 0 --num_sec_eval 5 --eval_min_dist_cat -64 --eval_max_dist_cat 64 --eval_len_traj_pred 64
+        python infer.py ${INFER_COMMON} run.eval_type=time run.gt=false
     elif [ "$EVAL_MODE" = "rollout" ]; then
-        python infer.py --exp config/raenwm.yaml --datasets ${DATASET} --batch_size 32 --num_workers 12 --input_fps 4 --checkpoint_path ${CKPT_PATH} --sampling_method euler --num_steps 50 --eval_type rollout --output_dir ${RESULTS_FOLDER} --gt 0 --rollout_fps_values 4 --num_sec_eval 5 --eval_min_dist_cat -64 --eval_max_dist_cat 64 --eval_len_traj_pred 64
+        python infer.py ${INFER_COMMON} run.eval_type=rollout run.gt=false 'run.rollout_fps_values=[4]'
     fi
 }
 
-# Define function for Evaluation
+# Define function for Evaluation (evaluate.py remains a plain argparse metrics script)
 run_eval() {
     echo "--- Running Metrics Evaluation ---"
     if [ "$EVAL_MODE" = "time" ]; then

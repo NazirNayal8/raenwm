@@ -17,7 +17,7 @@ import yaml
 import pickle
 import tqdm
 from torch.utils.data import Dataset
-from misc import angle_difference, get_data_path, get_delta_np, normalize_data, to_local_coords
+from modeling.utils.misc import angle_difference, get_data_path, get_delta_np, normalize_data, to_local_coords
 
 class BaseDataset(Dataset):
     def __init__(

@@ -1,4 +1,4 @@
-models/
+checkpoints/
 .trae/
 latest.pth.tar
 data/

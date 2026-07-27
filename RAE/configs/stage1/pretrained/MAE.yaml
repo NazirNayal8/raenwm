@@ -6,7 +6,7 @@ stage_1:
     encoder_input_size: 256
     encoder_params: {'model_name': 'facebook/vit-mae-base'}
     decoder_config_path: 'RAE/configs/decoder/ViTXL'
-    pretrained_decoder_path: 'models/decoders/mae/base_p16/ViTXL_n08/model.pt'
+    pretrained_decoder_path: 'checkpoints/decoders/mae/base_p16/ViTXL_n08/model.pt'
     noise_tau: 0.
     reshape_to_2d: True
-    normalization_stat_path: 'models/stats/mae/base_p16/ImageNet1k/stat.pt'
+    normalization_stat_path: 'checkpoints/stats/mae/base_p16/ImageNet1k/stat.pt'

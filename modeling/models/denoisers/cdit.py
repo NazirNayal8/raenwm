@@ -8,6 +8,9 @@
 # GLIDE: https://github.com/openai/glide-text2im
 # MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
 # --------------------------------------------------------
+from dataclasses import dataclass
+from typing import Literal, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +18,9 @@ import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed
 from RAE.src.stage2.models.model_utils import RMSNorm, NormAttention, SwiGLUFFN, VisionRotaryEmbeddingFast
+
+from modeling.models.denoisers.base import Denoiser
+from modeling.models.denoisers import DENOISERS
 
 
 def modulate(x, shift, scale):
@@ -198,9 +204,14 @@ class DDTFinalLayer(nn.Module):
         return x
 
 
-class CDiT(nn.Module):
+class CDiT(Denoiser):
     """
     Diffusion model with a Transformer backbone.
+
+    Implements the ``Denoiser`` contract: forward(x, t, y, x_cond, rel_t), the
+    in_channels/out_channels/patch_size/context_size/head_width attributes, plus
+    ``attention_shape`` for the flash-attention probe (``set_return_intermediate_features``
+    is inherited from the base).
     """
     def __init__(
         self,
@@ -396,6 +407,20 @@ class CDiT(nn.Module):
             return imgs_mu
         return imgs
 
+    def attention_shape(self) -> tuple[int, int, int]:
+        """(num_heads, head_dim, seqlen) for the flash-attention diagnostic probe.
+
+        Raises ValueError if the shape can't be introspected so the probe falls back
+        to safe defaults (matches the original train.py introspection logic).
+        """
+        attn0 = self.blocks[0].attn
+        num_heads = int(getattr(attn0, "num_heads", self.num_heads) or self.num_heads)
+        head_dim = int(getattr(attn0, "head_dim", 0) or 0)
+        seqlen = int(getattr(self.x_embedder, "num_patches", 0) or 0)
+        if num_heads <= 0 or head_dim <= 0 or seqlen <= 0:
+            raise ValueError("invalid attention shape")
+        return num_heads, head_dim, seqlen
+
     def forward(self, x, t, y, x_cond, rel_t):
         # Keep raw x_t for DDT head (RAE-style: head re-embeds raw x_t)
         x_raw = x
@@ -533,3 +558,45 @@ CDiT_models = {
     'CDiT-B/2':  CDiT_B_2,
     'CDiT-S/2':  CDiT_S_2
 }
+
+
+#################################################################################
+#                              CDiT config + factory                            #
+#################################################################################
+
+@dataclass(kw_only=True)
+class CDiTCfg:
+    """Config for the CDiT denoiser family.
+
+    ``variation`` selects the size (depth/hidden_size/heads are fixed by it). The
+    ``in_channels`` / ``input_size`` / ``context_size`` fields are filled at runtime
+    by ``modeling.models.wire_denoiser_to_tokenizer`` from the tokenizer + data cfg.
+    """
+    name: Literal["CDiT"]
+    variation: Literal["XL/2", "L/2", "B/2", "S/2"]
+    learn_sigma: bool = False
+    head_width: Optional[int] = None
+    head_depth: int = 2
+    head_num_heads: int = 16
+    use_low_rank_adaln_head: bool = False
+    use_qknorm: bool = False
+    # Wired to the tokenizer / data resolution at build time:
+    in_channels: int = 0
+    input_size: int = 0
+    context_size: int = 0
+
+
+@DENOISERS.register(CDiTCfg)
+def build_cdit(cfg: CDiTCfg) -> CDiT:
+    factory = CDiT_models[f"CDiT-{cfg.variation}"]
+    return factory(
+        context_size=cfg.context_size,
+        input_size=cfg.input_size,
+        in_channels=cfg.in_channels,
+        learn_sigma=cfg.learn_sigma,
+        head_width=cfg.head_width,
+        head_depth=cfg.head_depth,
+        head_num_heads=cfg.head_num_heads,
+        use_low_rank_adaln_head=cfg.use_low_rank_adaln_head,
+        use_qknorm=cfg.use_qknorm,
+    )

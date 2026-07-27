@@ -14,7 +14,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 import torch.distributed as torch_dist
-import distributed as dist
+from modeling.utils import distributed as dist
 import lpips
 try:
     from dreamsim import dreamsim

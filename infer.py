@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-from distributed import init_distributed
+from modeling.utils.distributed import init_distributed
 import torch
 import os
 import sys
@@ -24,14 +24,22 @@ from RAE.src.utils.model_utils import instantiate_from_config
 from RAE.src.utils.train_utils import parse_configs
 from RAE.src.stage1.rae import RAE
 from RAE.src.stage2.transport.transport import Transport, ModelType, PathType, WeightType, Sampler
-import misc
-import distributed as dist
-from models import CDiT_models
-from datasets import EvalDataset
+from modeling.utils import misc
+from modeling.utils import distributed as dist
+from modeling.models import CDiT_models
+from modeling.dataset import EvalDataset
 from PIL import Image
 import torch.nn.functional as F
 import math
 from time import time
+
+import hydra
+from omegaconf import DictConfig
+from types import SimpleNamespace
+from modeling.config import load_typed_root_config, InferRootCfg
+from modeling.models import get_tokenizer, get_denoiser, wire_denoiser_to_tokenizer
+from modeling.transport import build_transport, make_transport_sampler
+from modeling.dataset import get_eval_dataset
 
 
 def save_image(output_file, img):
@@ -332,91 +340,42 @@ def _filter_batch_by_existing(output_dir, idxs, obs_image, gt_image, delta, expe
     )
 
 @torch.no_grad
-def main(args):
+@hydra.main(version_base=None, config_path="config", config_name="infer")
+def main(cfg_dict: DictConfig):
+    cfg: InferRootCfg = load_typed_root_config(cfg_dict, InferRootCfg)
+
     _, _, device, _ = init_distributed()
     device = torch.device(device)
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
-    exp_eval = args.exp
 
-    # model & config setup
-    if args.gt:
-        args.save_output_dir = os.path.join(args.output_dir, 'gt')
+    num_cond = cfg.data.eval_context_size
+
+    # Derive the output subfolder (mirrors the old naming).
+    if cfg.run.gt:
+        save_output_dir = os.path.join(cfg.run.output_dir, 'gt')
     else:
         save_name = None
-        if args.checkpoint_path:
-            ckpt_dir = os.path.dirname(os.path.abspath(args.checkpoint_path))
-            run_dir = os.path.dirname(ckpt_dir)
-            save_name = os.path.basename(run_dir)
+        if cfg.checkpoint.path:
+            ckpt_dir = os.path.dirname(os.path.abspath(cfg.checkpoint.path))
+            save_name = os.path.basename(os.path.dirname(ckpt_dir))
         if not save_name:
-            save_name = os.path.basename(exp_eval).split('.')[0]
-        save_name = f"{save_name}_{args.sampling_method}"
-        args.save_output_dir = os.path.join(args.output_dir, save_name)
+            save_name = cfg.checkpoint.run_name
+        save_name = f"{save_name}_{cfg.sampling.sampling_method}"
+        save_output_dir = os.path.join(cfg.run.output_dir, save_name)
+    os.makedirs(save_output_dir, exist_ok=True)
 
-    os.makedirs(args.save_output_dir, exist_ok=True)
-
-    with open("config/eval_config.yaml", "r") as f:
-        default_config = yaml.safe_load(f)
-    config = default_config
-
-    with open(exp_eval, "r") as f:
-        user_config = yaml.safe_load(f)
-    config.update(user_config)
-
-    if args.eval_min_dist_cat is not None or args.eval_max_dist_cat is not None:
-        config.setdefault('eval_distance', {})
-        if args.eval_min_dist_cat is not None:
-            config['eval_distance']['eval_min_dist_cat'] = int(args.eval_min_dist_cat)
-        if args.eval_max_dist_cat is not None:
-            config['eval_distance']['eval_max_dist_cat'] = int(args.eval_max_dist_cat)
-
-    if args.eval_len_traj_pred is not None:
-        config['eval_len_traj_pred'] = int(args.eval_len_traj_pred)
-
-    latent_size = config['image_size'] // 14
-    args.latent_size = latent_size
-
-    num_cond = config['context_size']
     model_lst = (None, None, None)
-    if not args.gt:
-        config_path = config.get('config_path', 'RAE/configs/stage1/pretrained/DINOv2-B.yaml')
-        rae_config, *_ = parse_configs(config_path)
-        rae: RAE = instantiate_from_config(rae_config).to(device).eval()
-        model_kwargs = {
-            'context_size': num_cond,
-            'input_size': latent_size,
-            'in_channels': rae.latent_dim,
-            'learn_sigma': bool(config.get('learn_sigma', False)),
-            'head_width': config.get('head_width', rae.latent_dim),
-            'head_depth': int(config.get('head_depth', 2)),
-            'head_num_heads': int(config.get('head_num_heads', 16)),
-        }
-        try:
-            model = CDiT_models[config['model']](**model_kwargs)
-        except TypeError:
-            model_kwargs.pop('head_width', None)
-            model_kwargs.pop('head_depth', None)
-            model_kwargs.pop('head_num_heads', None)
-            model = CDiT_models[config['model']](**model_kwargs)
-        
-        checkpoint_path = None
-        
-        if args.checkpoint_path:
-            checkpoint_path = args.checkpoint_path
-            
-        elif 'checkpoint_path' in config and config['checkpoint_path']:
-            checkpoint_path = config['checkpoint_path']
-            
-        elif 'checkpoint_name' in config and config['checkpoint_name']:
-            checkpoint_path = f'{config["results_dir"]}/{config["run_name"]}/checkpoints/{config["checkpoint_name"]}.pth.tar'
-            
-        else:
-            checkpoint_path = f'{config["results_dir"]}/{config["run_name"]}/checkpoints/{args.ckp}.pth.tar'
-            
-        
+    if not cfg.run.gt:
+        # Frozen RAE tokenizer + trained CDiT (EMA weights) + transport, all typed.
+        tokenizer = get_tokenizer(cfg.model.tokenizer).to(device).eval()
+        latent_size = tokenizer.latent_spatial_size(cfg.data.image_size)
+        wire_denoiser_to_tokenizer(cfg.model.denoiser, tokenizer, cfg.data)
+        model = get_denoiser(cfg.model.denoiser)
+
+        checkpoint_path = cfg.checkpoint.resolve()
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-            
         ckp = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         _state = {k.replace('_orig_mod.', ''): v for k, v in ckp.get("ema", {}).items()}
         incompatible = model.load_state_dict(_state, strict=False)
@@ -427,41 +386,43 @@ def main(args):
         except Exception:
             pass
 
-        
         model.eval()
         model.to(device)
         model = torch.compile(model)
 
-        tp = config.get("transport", {}) if isinstance(config, dict) else {}
-        latent_size = int(config["image_size"]) // 14
-        shift_dim = int(rae.latent_dim) * int(latent_size) * int(latent_size)
-        shift_base = float(tp.get("time_dist_shift_base", 4096))
-        time_dist_shift = math.sqrt(float(shift_dim) / float(shift_base))
-        if 'time_dist_shift' in tp and tp.get('time_dist_shift') is not None:
-            time_dist_shift = float(tp.get('time_dist_shift'))
-        if bool(tp.get('time_dist_shift_disable', False)):
-            time_dist_shift = 1.0
-        print(f"[Infer] Using time_dist_shift={time_dist_shift:.4f} = sqrt({shift_dim}/{shift_base}).")
-
-        transport = Transport(
-            model_type=getattr(ModelType, str(tp.get('model_type', 'velocity')).upper()),
-            path_type=getattr(PathType, str(tp.get('path_type', 'linear')).upper()),
-            loss_type=getattr(WeightType, str(tp.get('loss_type', 'velocity')).upper()),
-            time_dist_type=str(tp.get('time_dist_type', 'uniform')),
-            time_dist_shift=time_dist_shift,
-            train_eps=1e-3,
-            sample_eps=1e-3,
-        )
-        sampler = Sampler(transport)
+        transport = build_transport(cfg.model.transport, tokenizer.latent_dim, latent_size)
+        sampler = make_transport_sampler(transport)
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], find_unused_parameters=False)
-        model_lst = (model, transport, sampler, rae)
+        model_lst = (model, transport, sampler, tokenizer)
+    else:
+        # GT mode builds no model; latent_size only needed to satisfy the args bridge.
+        latent_size = cfg.data.image_size // cfg.model.tokenizer.spatial_compression
+
+    # Bridge the remaining runtime knobs to the eval loop + generate_* helpers, which
+    # still read them off an `args`-style object.
+    args = SimpleNamespace(
+        gt=cfg.run.gt,
+        output_dir=cfg.run.output_dir,
+        save_output_dir=save_output_dir,
+        latent_size=latent_size,
+        sampling_method=cfg.sampling.sampling_method,
+        num_steps=cfg.sampling.num_steps,
+        input_fps=cfg.run.input_fps,
+        num_sec_eval=cfg.run.num_sec_eval,
+        rollout_fps_values=list(cfg.run.rollout_fps_values),
+        eval_type=cfg.run.eval_type,
+        batch_size=cfg.run.batch_size,
+        num_workers=cfg.run.num_workers,
+        datasets=cfg.run.datasets,
+        max_ids=cfg.run.max_ids,
+    )
 
     # Loading Datasets
     dataset_names = args.datasets.split(',')
     datasets = {}
 
     for dataset_name in dataset_names:
-        dataset_val = get_dataset_eval(config, dataset_name, args.eval_type, predefined_index=False)
+        dataset_val = get_eval_dataset(cfg.data, dataset_name, args.eval_type, predefined_index=False)
 
         if len(dataset_val) % num_tasks != 0:
             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
@@ -522,7 +483,6 @@ def main(args):
 
                 obs_image = obs_image[:, -num_cond:].to(device)
                 gt_image = gt_image.to(device)
-                num_cond = config["context_size"]
 
                 if args.eval_type == 'rollout':
                     for rollout_fps in args.rollout_fps_values:
@@ -594,29 +554,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument("--output_dir", type=str, default=None, help="output directory")
-    parser.add_argument("--exp", type=str, default=None, help="experiment name")
-    parser.add_argument("--ckp", type=str, default='0100000')
-    parser.add_argument("--checkpoint_path", type=str, default=None, help="Full checkpoint file path; if provided, --ckp is ignored")
-    parser.add_argument("--eval_min_dist_cat", type=int, default=None, help="Override eval_distance.eval_min_dist_cat for this run")
-    parser.add_argument("--eval_max_dist_cat", type=int, default=None, help="Override eval_distance.eval_max_dist_cat for this run")
-    parser.add_argument("--eval_len_traj_pred", type=int, default=None, help="Override eval_len_traj_pred for this run")
-    parser.add_argument("--num_sec_eval", type=int, default=5)
-    parser.add_argument("--input_fps", type=int, default=4)
-    parser.add_argument("--datasets", type=str, default=None, help="dataset name")
-    parser.add_argument("--num_workers", type=int, default=8, help="num workers")
-    parser.add_argument("--batch_size", type=int, default=16, help="batch size")
-    parser.add_argument("--eval_type", type=str, default=None, help="type of evaluation has to be either 'time' or 'rollout'")
-    # Rollout Evaluation Args
-    parser.add_argument("--rollout_fps_values", type=str, default='1,4', help="")
-    parser.add_argument("--gt", type=int, default=0, help="set to 1 to produce ground truth evaluation set")
-    parser.add_argument("--sampling_method", type=str, default="euler")
-    parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--max_ids", type=int, default=0, help="Max number of sample IDs to generate/process (0 means no limit)")
-    args = parser.parse_args()
-    
-    args.rollout_fps_values = [int(fps) for fps in args.rollout_fps_values.split(',')]
-    
-    main(args)
+    main()

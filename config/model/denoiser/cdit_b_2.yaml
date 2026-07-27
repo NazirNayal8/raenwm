@@ -1,0 +1,10 @@
+# @package model.denoiser
+name: CDiT
+variation: B/2
+learn_sigma: false
+head_width: 2048
+head_depth: 2
+head_num_heads: 16
+use_low_rank_adaln_head: false
+use_qknorm: false
+# in_channels / input_size / context_size are wired at build time from the tokenizer + data cfg

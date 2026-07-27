@@ -20,11 +20,16 @@ if RAE_SRC not in sys.path:
 import wandb
 import tqdm
 import numpy as np
-from distributed import init_distributed
-from datasets import TrainingDataset, EvalDataset
-from misc import transform, unnormalize_data, get_data_path, normalize_data
+from modeling.utils.distributed import init_distributed
+from modeling.dataset import TrainingDataset, EvalDataset
+from modeling.utils.misc import transform, unnormalize_data, get_data_path, normalize_data
 from RAE.src.utils.model_utils import instantiate_from_config
 from RAE.src.utils.train_utils import parse_configs
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from types import SimpleNamespace
+from modeling.config import load_typed_root_config, ProbeRootCfg
 
 from probe import LinearForwardDynamicsProbe
 
@@ -767,23 +772,18 @@ def get_args():
     return p.parse_args()
 
 
-def main():
+def train_probe(args, config):
     assert torch.cuda.is_available()
     _, rank, gpu, _ = init_distributed()
     device = torch.device(f"cuda:{gpu}")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    args = get_args()
-
     seed = int(args.global_seed) * dist.get_world_size() + rank
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
 
     exp_dir_override = str(args.exp_dir).strip() if args.exp_dir is not None else ""
 
@@ -1335,6 +1335,67 @@ def main():
         logger.info("Training finished.")
         if config.get("wandb", {}).get("enabled", False):
             wandb.finish()
+
+
+def _build_probe_config(cfg: ProbeRootCfg, cfg_dict: DictConfig) -> Dict[str, Any]:
+    """Flatten the typed config into the dict the probe code reads (build_encoder,
+    build_dataloaders, and the training loop all consume a flat ``config`` dict)."""
+    def _drop_none(d):  # so build_dataloaders skips absent train/test splits
+        return {k: v for k, v in d.items() if v is not None}
+
+    sources = OmegaConf.to_container(cfg_dict.data.sources, resolve=True)
+    return {
+        "config_path": cfg.config_path,
+        "run_name": cfg.run_name,
+        "results_dir": cfg.output_dir,
+        "encoder": OmegaConf.to_container(cfg_dict.encoder, resolve=True),
+        "pose_probe": OmegaConf.to_container(cfg_dict.pose_probe, resolve=True),
+        "datasets": {name: _drop_none(src) for name, src in sources.items()},
+        "distance": OmegaConf.to_container(cfg_dict.data.distance, resolve=True),
+        "context_size": cfg.data.context_size,
+        "len_traj_pred": cfg.data.len_traj_pred,
+        "image_size": cfg.data.image_size,
+        "normalize": cfg.data.normalize,
+        "batch_size": cfg.train.batch_size,
+        "num_workers": cfg.train.num_workers,
+        "eval_num_batches": cfg.train.eval_num_batches,
+        "wandb": OmegaConf.to_container(cfg_dict.wandb, resolve=True),
+    }
+
+
+@hydra.main(version_base=None, config_path="config", config_name="probe")
+def main(cfg_dict: DictConfig):
+    cfg: ProbeRootCfg = load_typed_root_config(cfg_dict, ProbeRootCfg)
+    t = cfg.train
+
+    # Bridge to the training body's args-style interface. Override flags that used to
+    # patch the flat config (encoder_type, forward_step, ...) are now hydra overrides,
+    # so they're left as None here (the in-body override block becomes a no-op).
+    args = SimpleNamespace(
+        config=None,
+        global_seed=cfg.seed,
+        bfloat16=1 if t.bfloat16 else 0,
+        torch_compile=1 if t.torch_compile else 0,
+        epochs=t.epochs,
+        log_every=t.log_every,
+        ckpt_every=t.ckpt_every,
+        eval_every=t.eval_every,
+        resume=t.resume,
+        exp_dir=t.exp_dir,
+        test_only=1 if t.test_only else 0,
+        only_spatial_random_test=1 if t.only_spatial_random_test else 0,
+        test_action_modes=t.test_action_modes,
+        action_random_mode=t.action_random_mode,
+        encoder_type=None,
+        encoder_rae_config=None,
+        forward_probe_type=None,
+        forward_step=None,
+        fixed_lr=None,
+        batch_size=None,
+        run_suffix=None,
+    )
+    config = _build_probe_config(cfg, cfg_dict)
+    train_probe(args, config)
 
 
 if __name__ == "__main__":

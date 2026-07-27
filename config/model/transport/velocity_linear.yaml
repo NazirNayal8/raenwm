@@ -1,0 +1,10 @@
+# @package model.transport
+model_type: velocity
+path_type: linear
+loss_type: velocity
+time_dist_type: uniform
+time_dist_shift: null          # null -> derived from latent geometry
+time_dist_shift_base: 4096
+time_dist_shift_disable: false
+train_eps: 1.0e-3
+sample_eps: 1.0e-3

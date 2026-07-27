@@ -1,0 +1,9 @@
+# @package model.denoiser
+name: CDiT
+variation: L/2
+learn_sigma: false
+head_width: 2048
+head_depth: 2
+head_num_heads: 16
+use_low_rank_adaln_head: false
+use_qknorm: false

@@ -39,12 +39,17 @@ import evo.main_rpe as main_rpe
 from evo.core.metrics import PoseRelation
 
 from diffusion import create_diffusion
-from datasets import TrajectoryEvalDataset
+from modeling.dataset import TrajectoryEvalDataset
 from infer import model_forward_wrapper
-from misc import calculate_delta_yaw, get_action_torch, save_planning_pred, log_viz_single, transform, unnormalize_data
+from modeling.utils.misc import calculate_delta_yaw, get_action_torch, save_planning_pred, log_viz_single, transform, unnormalize_data
 from evaluate import save_metric_to_disk
-import distributed as dist
-from models import CDiT_models
+from modeling.utils import distributed as dist
+from modeling.models import CDiT_models
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from types import SimpleNamespace
+from modeling.config import load_typed_root_config, PlanningRootCfg
 
 
 with open("config/data_config.yaml", "r") as f:
@@ -140,7 +145,7 @@ def get_dataset_eval(config, dataset_name, predefined_index=True, subset_items=N
     return dataset
 
 class WM_Planning_Evaluator:
-    def __init__(self, args):
+    def __init__(self, args, config):
         super().__init__()
         self.args = args
         self.exp = args.exp
@@ -157,13 +162,8 @@ class WM_Planning_Evaluator:
 
         self.exp_eval = self.exp
 
-        with open("config/eval_config.yaml", "r") as f:
-            default_config = yaml.safe_load(f)
-        self.config = default_config
-
-        with open(self.exp_eval, "r") as f:
-            user_config = yaml.safe_load(f)
-        self.config.update(user_config)
+        # Config is supplied pre-built (flat dict) by the hydra entrypoint below.
+        self.config = config
 
         args_score_type = str(getattr(self.args, "score_type", "dino") or "dino").strip().lower()
         cfg_score_type = str(self.config.get("planning_score_type", args_score_type) or args_score_type).strip().lower()
@@ -783,51 +783,73 @@ class WM_Planning_Evaluator:
 
         return ate, rpe_trans, rpe_rot
     
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    
-    # Default Args
-    parser.add_argument("--exp", type=str, default=None, help="experiment name")
-    parser.add_argument("--ckp", type=str, default='0100000', help="experiment name")
+def _build_planning_config(cfg: PlanningRootCfg, cfg_dict: DictConfig) -> dict:
+    """Flatten the typed config into the dict the evaluator reads via self.config."""
+    d = cfg.model.denoiser
+    return {
+        # model / checkpoint
+        "config_path": cfg.model.tokenizer.config_path,
+        "model": f"CDiT-{d.variation}",
+        "head_width": d.head_width,
+        "head_depth": d.head_depth,
+        "head_num_heads": d.head_num_heads,
+        "learn_sigma": d.learn_sigma,
+        "checkpoint_path": cfg.checkpoint.path,
+        "checkpoint_name": cfg.checkpoint.name,
+        "results_dir": cfg.checkpoint.results_dir,
+        "run_name": cfg.checkpoint.run_name,
+        "transport": OmegaConf.to_container(cfg_dict.model.transport, resolve=True),
+        # data
+        "image_size": cfg.data.image_size,
+        "normalize": cfg.data.normalize,
+        "traj_stride": cfg.data.traj_stride,
+        "eval_context_size": cfg.data.eval_context_size,
+        "trajectory_eval_context_size": cfg.data.trajectory_eval_context_size,
+        "trajectory_eval_len_traj_pred": cfg.data.trajectory_eval_len_traj_pred,
+        "trajectory_eval_distance": OmegaConf.to_container(cfg_dict.data.trajectory_eval_distance, resolve=True),
+        "eval_datasets": OmegaConf.to_container(cfg_dict.data.eval_datasets, resolve=True),
+        # planning
+        "planning_score_type": cfg.planning.score_type,
+        "planning_traj_sampler": cfg.planning.traj_sampler,
+    }
 
-    parser.add_argument("--datasets", type=str, default=None, help="dataset name")
-    parser.add_argument("--output_dir", type=str, default=None, help="output dir to save model predictions")
-    parser.add_argument('--save_preds', action='store_true', default=False, help='whether to save prediction tensors or not')
-    parser.add_argument("--num_workers", type=int, default=8, help="num workers")
-    parser.add_argument("--batch_size", type=int, default=16, help="batch size")
-    parser.add_argument("--checkpoint_path", type=str, default=None, help="full path to checkpoint file, if provided overrides --ckp")
-    parser.add_argument("--subset_items", type=int, default=0, help="number of evaluation samples (items) to run (0 means all)")
-    parser.add_argument("--subset_seed", type=int, default=0, help="random seed for subset sampling")
-    parser.add_argument("--run_tag", type=str, default="", help="optional run tag for unique output folder/name; default uses timestamp")
-    
-    # Planning Specific Args
-    parser.add_argument("--num_samples", type=int, default=10, help="num nomad samples to predict")
-    parser.add_argument("--rollout_stride", type=int, default=1, help="rollout stride")
-    parser.add_argument("--topk", type=int, default=5, help="top k samples to take mean and var for CEM")
-    parser.add_argument("--opt_steps", type=int, default=15, help="num iterations for CEM")
-    parser.add_argument("--num_repeat_eval", type=int, default=1, help="number of evals for one action")
-    parser.add_argument("--prior_mix", type=float, default=0.0)
-    parser.add_argument("--backtrack_allow", type=float, default=0.0)
-    parser.add_argument("--prior_beta", type=float, default=0.8)
-    parser.add_argument(
-        "--traj_sampler",
-        type=str,
-        default="",
-        choices=["curve", "line"],
-        help="trajectory sampling mode for CEM: curve (control points + interpolation) or line (constant delta); if omitted, uses planning_traj_sampler in the YAML config",
+
+@hydra.main(version_base=None, config_path="config", config_name="planning")
+def main(cfg_dict: DictConfig):
+    cfg: PlanningRootCfg = load_typed_root_config(cfg_dict, PlanningRootCfg)
+
+    # Bridge to the evaluator's args-style interface (it reads these off self.args).
+    p, r = cfg.planning, cfg.run
+    args = SimpleNamespace(
+        exp=cfg.checkpoint.run_name,       # only used to name the output folder
+        ckp=cfg.checkpoint.step,
+        checkpoint_path=cfg.checkpoint.path,
+        datasets=r.datasets,
+        output_dir=r.output_dir,
+        batch_size=r.batch_size,
+        num_workers=r.num_workers,
+        save_preds=r.save_preds,
+        subset_items=r.subset_items,
+        subset_seed=r.subset_seed,
+        run_tag=r.run_tag,
+        num_samples=p.num_samples,
+        rollout_stride=p.rollout_stride,
+        topk=p.topk,
+        opt_steps=p.opt_steps,
+        num_repeat_eval=p.num_repeat_eval,
+        prior_mix=p.prior_mix,
+        backtrack_allow=p.backtrack_allow,
+        prior_beta=p.prior_beta,
+        traj_sampler=p.traj_sampler,
+        plot=p.plot,
+        plot_topn=p.plot_topn,
+        score_type=p.score_type,
     )
-    parser.add_argument('--plot', action='store_true', default=False)
-    parser.add_argument("--plot_topn", type=int, default=10, help="only visualize top-n candidate trajectories (by loss) per CEM iteration; <=0 means all")
-    parser.add_argument(
-        "--score_type",
-        type=str,
-        default="dino",
-        choices=["dino", "lpips"],
-        help="scoring type for CEM selection: dino or lpips",
-    )
-    args = parser.parse_args()
-    
-    evaluator = WM_Planning_Evaluator(args)
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    gpu_id = torch.cuda.current_device()  # Or args.gpu if explicitly set
+    config = _build_planning_config(cfg, cfg_dict)
+
+    evaluator = WM_Planning_Evaluator(args, config)
     evaluator.evaluate()
+
+
+if __name__ == "__main__":
+    main()
