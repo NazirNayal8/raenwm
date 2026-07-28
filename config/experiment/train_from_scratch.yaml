@@ -1,0 +1,27 @@
+# @package _global_
+#
+# Baseline: train RAE-NWM from scratch (the README example).
+#   torchrun --nproc_per_node=8 train.py +experiment=train_from_scratch
+#
+# Each launch gets a fresh run_id (YYYY-MM-DD/HH-MM-SS) that names the output dir,
+# checkpoints, and wandb run. Ad-hoc overrides still stack on top, e.g.
+#   torchrun ... train.py +experiment=train_from_scratch train.batch_size=16
+#
+# --- Making your own experiment -------------------------------------------------
+# Copy this file to config/experiment/<your_variation>.yaml and change what you need.
+# To swap a whole component group, add a `defaults:` list with `override` (example):
+#   defaults:
+#     - override /model/denoiser: cdit_l_2
+#     - override /model/transport: velocity_linear
+# Then set any leaf fields below. Everything here is committed + reproducible, and
+# hydra also dumps the fully-resolved config to ${output_dir}/${run_id}/hydra/.hydra/.
+
+seed: 42
+
+train:
+  max_epochs: 50
+  mixed_precision: bf16
+  compile: true
+  log_every: 100
+  ckpt_every: 5000
+  eval_every: 1000

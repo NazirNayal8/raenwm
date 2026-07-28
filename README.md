@@ -104,18 +104,22 @@ We support WandB for experiment tracking. Before starting the training process, 
 wandb login
 ```
 
-To train the model from scratch, run:
+Training is configured with [Hydra](https://hydra.cc). To train the model from scratch, run:
 
 ```bash
-python train.py \
-  --config config/raenwm.yaml \
-  --epochs 50 \
-  --global-seed 42 \
-  --log-every 100 \
-  --ckpt-every 5000 \
-  --eval-every 1000 \
-  --bfloat16 1 \
-  --torch-compile 1
+torchrun --nproc_per_node=8 train.py +experiment=train_from_scratch
+```
+
+`+experiment=train_from_scratch` loads [`config/experiment/train_from_scratch.yaml`](config/experiment/train_from_scratch.yaml), the committed baseline (50 epochs, seed 42, …). Each launch is assigned a unique **run id** (`YYYY-MM-DD/HH-MM-SS`) that names its output directory (`logs/<run_id>/checkpoints/`) and its Weights & Biases run, and Hydra dumps the fully-resolved config to `logs/<run_id>/hydra/`. This keeps every run reproducible.
+
+Override any field on the command line, or copy the experiment file to define a new reproducible variation:
+
+```bash
+# ad-hoc overrides
+torchrun --nproc_per_node=8 train.py +experiment=train_from_scratch train.batch_size=16 model/denoiser=cdit_l_2
+
+# resume a specific run from its latest checkpoint
+torchrun --nproc_per_node=8 train.py +experiment=train_from_scratch run_id=2026-07-27/18-35-16
 ```
 
 ## 📊 Inference & Evaluation
@@ -151,16 +155,11 @@ To reproduce the representation analysis (probe experiment) mentioned in the pap
 **Train and Evaluate:**
 Training the probe will automatically run the evaluation at the end of the process:
 ```bash
-python train_probe.py \
-  --config config/probe.yaml \
-  --epochs 5 \
-  --global-seed 42 \
-  --log-every 100 \
-  --ckpt-every 1000 \
-  --eval-every 1000 \
-  --bfloat16 1 \
-  --torch-compile 0
+torchrun --nproc_per_node=8 train_probe.py \
+  seed=42 train.epochs=5 train.log_every=100 train.ckpt_every=1000 train.eval_every=1000
 ```
+
+The probe reads [`config/probe.yaml`](config/probe.yaml); override any field with `key=value` as above.
 
 ## 🙏 Acknowledgements
 

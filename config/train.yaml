@@ -10,8 +10,10 @@ defaults:
   - sampling@eval.sampling: euler_50
   - _self_
 
-output_dir: logs        # experiment dir = ${output_dir}/${run_name}
-run_name: raenwm
+output_dir: logs        # experiment dir = ${output_dir}/${run_id}
+# Unique per-run id -> names the output dir, checkpoints, and wandb run.
+# Default is a launch timestamp; pass run_id=<YYYY-MM-DD/HH-MM-SS> to resume a run.
+run_id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
 seed: 0
 
 train:
@@ -46,7 +48,7 @@ wandb:
   enabled: true
   project: raenwm-training
   entity: null
-  run_name: null          # null -> ${run_name}_<timestamp>
+  run_name: null          # null -> uses run_id; set to override the wandb run name
   tags: [raenwm, rae, cdit]
   notes: "Training RAENWM"
 
@@ -54,4 +56,4 @@ hydra:
   job:
     chdir: false          # keep cwd at repo root (relative paths: data/, checkpoints/, config/)
   run:
-    dir: ${output_dir}/${run_name}/hydra
+    dir: ${output_dir}/${run_id}/hydra

@@ -114,7 +114,7 @@ class ModelCfg:
 @dataclass(kw_only=True)
 class TrainRootCfg:
     output_dir: str
-    run_name: str
+    run_id: str            # unique per-run id (default: ${now:%Y-%m-%d}/${now:%H-%M-%S})
     train: TrainCfg
     model: ModelCfg
     data: DataCfg

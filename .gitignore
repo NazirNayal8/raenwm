@@ -9,6 +9,11 @@ wandb/
 __pycache__/
 *.py[cod]
 *$py.class
+.vscode/
+data_splits/
+logs/
+notebooks/
+storage
 
 *.pth
 *.pt

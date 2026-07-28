@@ -149,7 +149,10 @@ def main(cfg_dict: DictConfig):
 
     # Setup an experiment folder:
     os.makedirs(cfg.output_dir, exist_ok=True)  # Holds all experiment subfolders
-    experiment_dir = f"{cfg.output_dir}/{cfg.run_name}"
+    # Each run is identified by cfg.run_id (a YYYY-MM-DD/HH-MM-SS timestamp by
+    # default) — it names the output dir, the checkpoints, and the wandb run. Pass an
+    # existing run_id to resume that run from its latest.pth.tar.
+    experiment_dir = f"{cfg.output_dir}/{cfg.run_id}"
     checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
     if rank == 0:
         # Only rank 0 creates dirs, logs, and owns the wandb run.
@@ -158,9 +161,8 @@ def main(cfg_dict: DictConfig):
         logger.info(f"Experiment directory created at {experiment_dir}")
 
         if cfg.wandb.enabled:
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = cfg.wandb.run_name or f"{cfg.run_name}_{timestamp}"
+            # wandb run name = run_id by default (a wandb.run_name override still wins).
+            run_name = cfg.wandb.run_name or cfg.run_id
             wandb.init(
                 project=cfg.wandb.project,
                 name=run_name,
